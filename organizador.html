@@ -1,0 +1,158 @@
+<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Panel del profesor</title><link rel="stylesheet" href="panel.css"></head>
+<body>
+<h1>Panel del profesor</h1>
+<div class="card2" id="control"></div>
+<div class="card2">
+  <h2>1 · Jugadores guardados</h2>
+  <div class="row"><input type="text" id="newname" placeholder="Nombre (o varios separados por coma)"><button id="add">Añadir</button></div>
+  <div class="row" style="margin-bottom:6px"><button class="mini" id="all">Marcar todos</button><button class="mini" id="none">Desmarcar todos</button></div>
+  <div id="roster"></div>
+</div>
+<div class="card2">
+  <h2>2 · Nueva ronda</h2>
+  <p class="muted" id="selinfo"></p>
+  <label class="muted">Cantidad de impostores</label>
+  <select id="impn"></select>
+  <div id="impsel"></div>
+  <button class="main" id="newround">Crear ronda</button>
+</div>
+<div class="card2">
+  <h2>Entrar a votar</h2>
+  <div class="link" id="link"></div>
+  <div id="qrbox2"></div>
+  <div class="row"><button id="copy">Copiar link</button><button id="toggleqr">Mostrar QR en el proyector</button></div>
+</div>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="firebase-config.js"></script>
+<script src="game.js"></script>
+<script>
+connect();
+const PIN=typeof PIN_ORGANIZADOR==='string'?PIN_ORGANIZADOR:'';
+if(PIN&&sessionStorage.getItem('pin')!==PIN){
+  const v=prompt('PIN del profesor:');
+  if(v!==PIN){document.body.innerHTML='<div class="err">PIN incorrecto. Recarga la página.</div>';throw new Error('pin')}
+  sessionStorage.setItem('pin',v);
+}
+let roster={},G=null,secret=null,uiQR=false,impCount=1,impChoices=['random'];
+const link=new URL('index.html',location.href).href;
+$('#link').textContent=link;
+try{new QRCode($('#qrbox2'),{text:link,width:170,height:170})}catch(e){}
+// ----- Lista de jugadores -----
+const selected=()=>Object.entries(roster).filter(([id,p])=>p.play!==false).map(([id,p])=>({id,name:p.name}));
+function renderRoster(){
+  const ids=Object.keys(roster);
+  $('#roster').innerHTML=ids.length?ids.map(id=>{const p=roster[id];return `<div class="pl"><input type="checkbox" data-play="${id}" ${p.play!==false?'checked':''}><span class="nm">${esc(p.name)}</span><button class="mini" data-ren="${id}">✎</button><button class="mini warn" data-del="${id}">✕</button></div>`}).join(''):'';
+  const s=selected();
+  $('#selinfo').textContent=s.length+' jugador(es) marcados.';
+  renderImp();
+}
+// 1 impostor por cada 2 jugadores extra: máx. 1 con 3-4 jugadores, 2 con 5-6, 3 con 7 o más
+const maxImp=n=>Math.max(1,Math.min(3,Math.floor((n-1)/2)));
+function renderImp(){
+  const s=selected(),mx=maxImp(s.length);
+  if(impCount>mx)impCount=mx;
+  $('#impn').innerHTML=[1,2,3].filter(n=>n<=mx).map(n=>`<option value="${n}" ${n===impCount?'selected':''}>${n}</option>`).join('');
+  impChoices=Array.from({length:impCount},(_,i)=>{const c=impChoices[i];return c&&c!=='random'&&s.some(p=>p.id===c)?c:'random'});
+  $('#impsel').innerHTML=impChoices.map((c,i)=>`<label class="muted">Impostor ${i+1}</label><select data-imp="${i}"><option value="random">Al azar</option>${s.map(p=>`<option value="${p.id}" ${c===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>`).join('');
+}
+function addNames(){
+  const names=$('#newname').value.split(/[,\n]/).map(x=>x.trim()).filter(Boolean);
+  names.forEach(n=>db.ref('roster').push({name:n,play:true}));
+  $('#newname').value='';
+}
+$('#add').onclick=addNames;
+$('#newname').addEventListener('keydown',e=>{if(e.key==='Enter')addNames()});
+$('#roster').addEventListener('click',e=>{
+  const d=e.target.closest('[data-del]'),r=e.target.closest('[data-ren]');
+  if(d&&confirm('¿Borrar a '+roster[d.dataset.del].name+' de la lista?'))db.ref('roster/'+d.dataset.del).remove();
+  if(r){const n=prompt('Nuevo nombre:',roster[r.dataset.ren].name);if(n&&n.trim())db.ref('roster/'+r.dataset.ren+'/name').set(n.trim())}
+});
+$('#roster').addEventListener('change',e=>{const c=e.target.closest('[data-play]');if(c)db.ref('roster/'+c.dataset.play+'/play').set(c.checked)});
+const setAll=v=>{const u={};Object.keys(roster).forEach(id=>u[id+'/play']=v);db.ref('roster').update(u)};
+$('#all').onclick=()=>setAll(true);$('#none').onclick=()=>setAll(false);
+$('#impn').onchange=e=>{impCount=+e.target.value;renderImp()};
+$('#impsel').addEventListener('change',e=>{const i=e.target.dataset.imp;if(i!==undefined)impChoices[+i]=e.target.value});
+// ----- Nueva ronda -----
+$('#newround').onclick=()=>{
+  const sel=selected(),n=impCount;
+  if(sel.length<3)return alert('Marca al menos 3 jugadores.');
+  if(sel.length>NSKIN)return alert('Máximo '+NSKIN+' jugadores (no hay más personajes).');
+  if(sel.length<2*n+1)return alert('Con '+n+' impostor(es) necesitas al menos '+(2*n+1)+' jugadores.');
+  const chosen=impChoices.slice(0,n).filter(c=>c!=='random'&&sel.some(p=>p.id===c));
+  if(new Set(chosen).size!==chosen.length)return alert('Elegiste al mismo jugador como impostor más de una vez.');
+  if(G&&!confirm('Hay una ronda en curso. ¿Crear una nueva y reemplazarla?'))return;
+  const skins=shuffle([...Array(NSKIN).keys()]),players={};
+  sel.forEach((p,i)=>{players[p.id]={name:p.name,skin:skins[i],alive:true,ord:i}});
+  const pool=shuffle(sel.map(p=>p.id).filter(id=>!chosen.includes(id)));
+  const impMap={};[...chosen,...pool.slice(0,n-chosen.length)].forEach(id=>impMap[id]=true);
+  db.ref().update({game:{round:Date.now(),meeting:0,phase:'wait',players},secret:{impostors:impMap}});
+  window.scrollTo({top:0,behavior:'smooth'});
+};
+// ----- Control de la partida -----
+const alivePs=()=>plist(G).filter(p=>p.alive);
+const impIds=()=>secret?(secret.impostors?Object.keys(secret.impostors):(secret.impostor?[secret.impostor]:[])):[];
+function closeVoting(){
+  const counts={};
+  Object.values(G.votes||{}).forEach(t=>{if(t==='skip'||(G.players[t]&&G.players[t].alive))counts[t]=(counts[t]||0)+1});
+  const max=Math.max(0,...Object.values(counts)),top=Object.keys(counts).filter(k=>counts[k]===max);
+  let ejected=null,motivo='empate';
+  if(max===0)motivo='saltó';
+  else if(top.length===1&&top[0]!=='skip')ejected=top[0];
+  else if(top.length===1)motivo='saltó';
+  const imps=impIds(),wasImpostor=ejected!==null&&imps.includes(ejected);
+  const aliveImps=imps.filter(id=>G.players[id]&&G.players[id].alive).length;
+  const impostorsLeft=aliveImps-(wasImpostor?1:0),aliveAfter=alivePs().length-(ejected!==null?1:0),crewAfter=aliveAfter-impostorsLeft;
+  // la tripulación gana si no queda ningún impostor; los impostores ganan cuando igualan o superan a la tripulación
+  const fin=impostorsLeft===0?'tripulacion':(impostorsLeft>=crewAfter?'impostor':null);
+  const result={motivo,wasImpostor,impostorsLeft,impostorsTotal:imps.length};
+  if(ejected!==null)result.ejected=ejected;
+  if(fin){result.fin=fin;result.impostorNames=imps.map(id=>G.players[id]?G.players[id].name:'?')}
+  const u={'game/phase':'count','game/result':result};
+  if(ejected!==null)u['game/players/'+ejected+'/alive']=false;
+  db.ref().update(u);
+}
+const act={
+  convocar:()=>db.ref().update({'game/phase':'meeting','game/meeting':(G.meeting||0)+1,'game/votes':null,'game/result':null}),
+  abrir:()=>db.ref('game/phase').set('voting'),
+  cerrar:()=>{if(confirm('¿Cerrar la votación y contar?'))closeVoting()},
+  next:()=>db.ref('game/phase').set('wait'),
+  reset:()=>{if(confirm('¿Borrar los votos recibidos?'))db.ref('game/votes').remove()},
+  cancel:()=>{if(confirm('¿Cancelar la ronda actual?'))db.ref().update({game:null,secret:null})},
+  top:()=>window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})
+};
+function renderControl(){
+  const el=$('#control');
+  if(!G||!G.players){el.innerHTML='<h2>Partida</h2><p class="muted">No hay ronda activa.</p>';return}
+  const names={wait:'En espera',meeting:'Reunión (discusión)',voting:'Votando',count:'Resultado'};
+  const ids=impIds(),impName=ids.map(id=>G.players[id]?G.players[id].name:'?').join(', ')||'?',impAlive=ids.filter(id=>G.players[id]&&G.players[id].alive).length;
+  const nv=Object.keys(G.votes||{}).length,r=G.result;
+  let btns='';
+  if(G.phase==='wait')btns='<button class="main" data-a="convocar">Convocar reunión</button>';
+  if(G.phase==='meeting')btns='<button class="main" data-a="abrir">Abrir votación</button>';
+  if(G.phase==='voting')btns=`<button class="main" data-a="cerrar">Cerrar votación y contar (${nv} votos)</button><button style="margin-top:8px" class="mini" data-a="reset">Borrar votos</button>`;
+  if(G.phase==='count'){
+    if(r&&r.fin)btns=`<div class="imp" style="border-color:#3fe05a;background:#10301a">${r.fin==='tripulacion'?'Ganó la tripulación':(r.impostorsTotal>1?'Ganaron los impostores':'Ganó el impostor')}</div><button class="main" data-a="top">Preparar nueva ronda ↓</button>`;
+    else btns='<button class="main" data-a="next">Siguiente reunión</button>';
+  }
+  let res='';
+  if(G.phase==='count'&&r){
+    const ej=r.ejected&&G.players[r.ejected];
+    res=`<p class="muted" style="margin-top:8px">Resultado: ${ej?esc(ej.name)+' fue expulsado ('+(r.wasImpostor?(r.impostorsTotal>1?'era un impostor':'era el impostor'):(r.impostorsTotal>1?'no era un impostor':'no era el impostor'))+')':(r.motivo==='empate'?'empate, nadie expulsado':'votación saltada, nadie expulsado')}</p>`;
+  }
+  el.innerHTML=`<h2>Partida en curso</h2><div class="chips"><span class="chip">Reunión ${G.meeting||0}</span><span class="chip">${names[G.phase]||G.phase}</span><span class="chip">Votos: ${nv}</span></div>
+  <div class="imp">${ids.length>1?'Impostores':'Impostor'}: <b>${esc(impName)}</b> <span class="muted">(vivos: ${impAlive})</span></div>
+  <div>${plist(G).map(p=>`<span class="chip ${p.alive?'':'dead'}" style="display:inline-block;margin:0 6px 6px 0">${esc(p.name)}</span>`).join('')}</div>${res}${btns}
+  <div style="margin-top:12px"><button class="mini warn" data-a="cancel">Cancelar ronda</button></div>`;
+}
+$('#control').addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(b&&act[b.dataset.a])act[b.dataset.a]()});
+// ----- QR en el proyector / copiar -----
+$('#toggleqr').onclick=()=>db.ref('ui/qr').set(!uiQR);
+$('#copy').onclick=()=>{try{navigator.clipboard.writeText(link);$('#copy').textContent='¡Copiado!';setTimeout(()=>$('#copy').textContent='Copiar link',1500)}catch(e){prompt('Copia el link:',link)}};
+// ----- Escuchar la base de datos -----
+db.ref('roster').on('value',s=>{roster=s.val()||{};renderRoster()});
+db.ref('game').on('value',s=>{G=s.val();renderControl()});
+db.ref('secret').on('value',s=>{secret=s.val();renderControl()});
+db.ref('ui/qr').on('value',s=>{uiQR=!!s.val();$('#toggleqr').textContent=uiQR?'Ocultar QR del proyector':'Mostrar QR en el proyector'});
+</script></body></html>
