@@ -35,14 +35,21 @@ function runGame(VOTE){
   // ===== Sonidos =====
   const AUD={};
   Object.entries({vote:'sfx/among-us-vote-locking_01.mp3',meeting:'sfx/emergency-meeting.mp3',eject:'sfx/among-us-eject-sound-effect.mp3'}).forEach(([k,u])=>{const a=new Audio(u);a.preload='auto';AUD[k]=a});
-  function play(k){const a=AUD[k];if(!a)return;try{a.pause();a.currentTime=0;const p=a.play();if(p&&p.catch)p.catch(()=>{})}catch(e){}}
+  function play(k){const a=AUD[k];if(!a)return;try{a.pause();a.currentTime=0;a.muted=false;const p=a.play();if(p&&p.catch)p.catch(e=>console.warn('Audio',k,e.name,e.message))}catch(e){}}
   // los navegadores bloquean el audio hasta que haya un toque/clic en la página: el primero lo desbloquea
   let unlocked=false;
   function unlock(){
-    if(unlocked)return;unlocked=true;
-    Object.values(AUD).forEach(a=>{a.muted=true;const p=a.play();if(p&&p.then)p.then(()=>{a.pause();a.currentTime=0;a.muted=false}).catch(()=>{a.muted=false});else a.muted=false});
+    if(unlocked)return;
+    Object.values(AUD).forEach(a=>{
+      if(!a.paused)return;
+      a.muted=true;
+      const p=a.play();
+      if(p&&p.then)p.then(()=>{unlocked=true;if(a.muted){a.pause();a.currentTime=0;a.muted=false}}).catch(()=>{a.muted=false});
+      else{unlocked=true;a.muted=false}
+    });
   }
-  ['pointerdown','keydown','touchstart'].forEach(ev=>document.addEventListener(ev,unlock,{passive:true}));
+  // el primer toque/clic/tecla en la página desbloquea el audio (se reintenta hasta que funcione)
+  ['pointerdown','mousedown','click','touchstart','touchend','keydown'].forEach(ev=>document.addEventListener(ev,unlock,{passive:true}));
   const votesCount=g=>g&&g.votes?Object.keys(g.votes).length:0;
   const myVote=()=>G&&G.votes&&G.votes[vid]!=null?G.votes[vid]:null;
   // Barra inferior de la tablet (igual que la offline: texto a la izquierda + "Saltar voto" a la derecha)
