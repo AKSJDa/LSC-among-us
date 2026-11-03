@@ -32,23 +32,29 @@ function runGame(VOTE){
   let G=null,sel=null,uiQR=false,tok=0,view='',tabKey='',lastKey='',lastState=null,first=true,expelledShown=false;
   const DISCUSS='<div class="discuss" id="dis" style="display:none"><div class="disc"><div class="circ"><img class="dbg" src="img/bg.png"><img class="cl" src="img/crewL.png"><img class="cr" src="img/crewR.png"></div><img class="dring" src="img/border.png"><img class="dtext" src="img/discuss.png"></div></div>';
   const BTN='<div class="btnc" data-act="ok">✓</div><div class="btnx" data-act="no">✕</div>';
-  // ===== Sonidos =====
-  const AUD={};
-  Object.entries({vote:'sfx/among-us-vote-locking_01.mp3',meeting:'sfx/emergency-meeting.mp3',eject:'sfx/among-us-eject-sound-effect.mp3'}).forEach(([k,u])=>{const a=new Audio(u);a.preload='auto';AUD[k]=a});
-  function play(k){const a=AUD[k];if(!a)return;try{a.pause();a.currentTime=0;a.muted=false;const p=a.play();if(p&&p.catch)p.catch(e=>console.warn('Audio',k,e.name,e.message))}catch(e){}}
-  // los navegadores bloquean el audio hasta que haya un toque/clic en la página: el primero lo desbloquea
-  let unlocked=false;
-  function unlock(){
-    if(unlocked)return;
-    Object.values(AUD).forEach(a=>{
-      if(!a.paused)return;
-      a.muted=true;
-      const p=a.play();
-      if(p&&p.then)p.then(()=>{unlocked=true;if(a.muted){a.pause();a.currentTime=0;a.muted=false}}).catch(()=>{a.muted=false});
-      else{unlocked=true;a.muted=false}
-    });
+  // ===== Sonidos (Web Audio: se decodifican al cargar y suenan al instante) =====
+  const AC=window.AudioContext||window.webkitAudioContext;
+  const actx=AC?new AC({latencyHint:'interactive'}):null;
+  const BUF={},LIVE={};
+  const SFX={vote:'sfx/among-us-vote-locking_01.mp3',meeting:'sfx/emergency-meeting.mp3',eject:'sfx/among-us-eject-sound-effect.mp3'};
+  if(actx)Object.entries(SFX).forEach(([k,u])=>{
+    fetch(u).then(r=>r.arrayBuffer()).then(b=>new Promise((ok,bad)=>actx.decodeAudioData(b,ok,bad))).then(d=>{BUF[k]=d}).catch(e=>console.warn('Audio',k,e));
+  });
+  function play(k){
+    if(!actx||!BUF[k])return;
+    const go=()=>{
+      try{
+        if(LIVE[k]){try{LIVE[k].stop()}catch(e){}}
+        const s=actx.createBufferSource();s.buffer=BUF[k];s.connect(actx.destination);LIVE[k]=s;s.start(0);
+      }catch(e){console.warn('Audio',k,e)}
+    };
+    if(actx.state==='running')return go();
+    // si el navegador lo tenía dormido: despertarlo y sonar solo si es inmediato (no dejar sonidos "viejos" en cola)
+    const t0=performance.now();
+    actx.resume().then(()=>{if(performance.now()-t0<400)go()}).catch(e=>console.warn('Audio',k,e.name));
   }
-  // el primer toque/clic/tecla en la página desbloquea el audio (se reintenta hasta que funcione)
+  // los navegadores bloquean el audio hasta que haya un toque/clic en la página: el primero lo desbloquea
+  function unlock(){if(actx&&actx.state!=='running')actx.resume().catch(()=>{})}
   ['pointerdown','mousedown','click','touchstart','touchend','keydown'].forEach(ev=>document.addEventListener(ev,unlock,{passive:true}));
   const votesCount=g=>g&&g.votes?Object.keys(g.votes).length:0;
   const myVote=()=>G&&G.votes&&G.votes[vid]!=null?G.votes[vid]:null;
@@ -62,9 +68,10 @@ function runGame(VOTE){
     if(!my&&sel==='skip')return '<span>Saltar el voto</span><div style="display:flex;gap:.8cqw"><div class="btnc" data-act="skipok">✓</div><div class="btnx" data-act="skipno">✕</div></div>';
     return `<span>${my?'Voto enviado':'Votación abierta'}</span><button class="skip" id="skip" ${my?'disabled':''}>${my==='skip'?'Voto saltado ✓':'Saltar voto'}</button>`;
   }
-  async function show(html,t){
-    if(!first){document.body.classList.add('fadeout');await sleep(450);if(t!==tok)return false}
-    first=false;$('#root').innerHTML=html;document.body.classList.remove('fadeout');return true;
+  async function show(html,t,ms=450){
+    if(!first){document.body.style.transitionDuration=ms+'ms';document.body.classList.add('fadeout');await sleep(ms);if(t!==tok)return false}
+    first=false;$('#root').innerHTML=html;document.body.classList.remove('fadeout');
+    setTimeout(()=>{document.body.style.transitionDuration=''},ms+50);return true;
   }
   const setFoot=h=>{const f=$('#foot');if(f)f.innerHTML=h};
   const effList=eff=>plist(G).map(p=>({...p,alive:p.alive||(eff&&G.result&&G.result.ejected===p.id)}));
@@ -135,7 +142,7 @@ function runGame(VOTE){
   async function meetingFlow(t,animate){
     if(!animate){await showTablet(t,false,discussFoot());return}
     const scene='<div class="stage"><div class="scene"><img class="burst" src="img/burst.png" alt=""><div class="pos"><img class="rojiazul" src="img/rojiazul.png" alt=""><img class="mesa" src="img/mesa_boton.png" alt=""><img class="mano" src="img/mano.png" alt=""></div><img class="etext" src="img/emergency.png" alt="Emergency Meeting"></div></div>';
-    if(!await show(scene,t))return;view='emergency';play('meeting');
+    play('meeting');if(!await show(scene,t,150))return;view='emergency';
     await sleep(1600);if(t!==tok)return;
     if(!await showTablet(t,false,discussFoot(),DISCUSS))return;
     await sleep(700);if(t!==tok)return;
