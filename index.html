@@ -32,29 +32,40 @@ function runGame(VOTE){
   let G=null,sel=null,uiQR=false,tok=0,view='',tabKey='',lastKey='',lastState=null,first=true,expelledShown=false;
   const DISCUSS='<div class="discuss" id="dis" style="display:none"><div class="disc"><div class="circ"><img class="dbg" src="img/bg.png"><img class="cl" src="img/crewL.png"><img class="cr" src="img/crewR.png"></div><img class="dring" src="img/border.png"><img class="dtext" src="img/discuss.png"></div></div>';
   const BTN='<div class="btnc" data-act="ok">✓</div><div class="btnx" data-act="no">✕</div>';
-  // ===== Sonidos (Web Audio: se decodifican al cargar y suenan al instante) =====
-  const AC=window.AudioContext||window.webkitAudioContext;
-  const actx=AC?new AC({latencyHint:'interactive'}):null;
-  const BUF={},LIVE={};
+  // ===== Sonidos: Web Audio (instantáneo) con respaldo en <audio> si algo falla =====
   const SFX={vote:'sfx/among-us-vote-locking_01.mp3',meeting:'sfx/emergency-meeting.mp3',eject:'sfx/among-us-eject-sound-effect.mp3'};
-  if(actx)Object.entries(SFX).forEach(([k,u])=>{
-    fetch(u).then(r=>r.arrayBuffer()).then(b=>new Promise((ok,bad)=>actx.decodeAudioData(b,ok,bad))).then(d=>{BUF[k]=d}).catch(e=>console.warn('Audio',k,e));
+  let actx=null;
+  try{const AC=window.AudioContext||window.webkitAudioContext;if(AC)actx=new AC({latencyHint:'interactive'})}catch(e){console.warn('Audio ctx',e)}
+  const BUF={},LIVE={},AUD={};
+  Object.entries(SFX).forEach(([k,u])=>{
+    const a=new Audio(u);a.preload='auto';AUD[k]=a;
+    if(actx)fetch(u).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.arrayBuffer()}).then(b=>new Promise((ok,bad)=>actx.decodeAudioData(b,ok,bad))).then(d=>{BUF[k]=d}).catch(e=>console.warn('Audio',k,e));
   });
+  function playEl(k){const a=AUD[k];if(!a)return;try{a.pause();a.currentTime=0;a.muted=false;const p=a.play();if(p&&p.catch)p.catch(e=>console.warn('Audio',k,e.name,e.message))}catch(e){}}
   function play(k){
-    if(!actx||!BUF[k])return;
-    const go=()=>{
+    if(actx&&BUF[k]&&actx.state==='running'){
       try{
         if(LIVE[k]){try{LIVE[k].stop()}catch(e){}}
         const s=actx.createBufferSource();s.buffer=BUF[k];s.connect(actx.destination);LIVE[k]=s;s.start(0);
+        return;
       }catch(e){console.warn('Audio',k,e)}
-    };
-    if(actx.state==='running')return go();
-    // si el navegador lo tenía dormido: despertarlo y sonar solo si es inmediato (no dejar sonidos "viejos" en cola)
-    const t0=performance.now();
-    actx.resume().then(()=>{if(performance.now()-t0<400)go()}).catch(e=>console.warn('Audio',k,e.name));
+    }
+    playEl(k);
+    if(actx&&actx.state!=='running')actx.resume().catch(()=>{});
   }
   // los navegadores bloquean el audio hasta que haya un toque/clic en la página: el primero lo desbloquea
-  function unlock(){if(actx&&actx.state!=='running')actx.resume().catch(()=>{})}
+  let unlocked=false;
+  function unlock(){
+    if(actx&&actx.state!=='running')actx.resume().catch(()=>{});
+    if(unlocked)return;
+    Object.values(AUD).forEach(a=>{
+      if(!a.paused)return;
+      a.muted=true;
+      const p=a.play();
+      if(p&&p.then)p.then(()=>{unlocked=true;if(a.muted){a.pause();a.currentTime=0;a.muted=false}}).catch(()=>{a.muted=false});
+      else{unlocked=true;a.muted=false}
+    });
+  }
   ['pointerdown','mousedown','click','touchstart','touchend','keydown'].forEach(ev=>document.addEventListener(ev,unlock,{passive:true}));
   const votesCount=g=>g&&g.votes?Object.keys(g.votes).length:0;
   const myVote=()=>G&&G.votes&&G.votes[vid]!=null?G.votes[vid]:null;
@@ -174,13 +185,26 @@ function runGame(VOTE){
   async function expulsionFlow(t){
     const r=G.result||{},ej=r.ejected&&G.players[r.ejected];
     const html='<div class="space"></div>'+(ej?`<div id="fly"><div class="flyer">${body(ej)}</div></div>`:'')+'<div class="msg"><p id="l1"></p><p id="l2"></p></div><div class="end" id="end"></div>';
-    if(!await show(html,t))return;view='expulsion';play('eject');
-    await sleep(1200);if(t!==tok)return;
+    if(!await show(html,t))return;view='expulsion';
+    // ===== El texto se ajusta a la duración del audio =====
+    // START: cuándo empieza a escribirse (ms desde que arranca el audio) · TAIL: cuánto antes de que termine el audio debe acabar de escribirse
+    const START=1200,TAIL=250,len=x=>[...x].length;
+    const dur=(BUF.eject?BUF.eject.duration:4.6)*1000,t0=performance.now();
+    play('eject');
+    await sleep(START);if(t!==tok)return;
+    const W=Math.max(1200,dur-(performance.now()-t0)-TAIL); // tiempo disponible para escribir todo
+    const clampMs=v=>Math.min(80,Math.max(15,v));
     if(ej){
-      if(!await type($('#l1'),ej.name,140,t))return;await sleep(900);if(t!==tok)return;
       const art=(r.impostorsTotal||1)>1?'un':'el';
-      if(!await type($('#l1'),r.wasImpostor?` era ${art} impostor.`:` no era ${art} impostor.`,70,t))return;
-    }else if(!await type($('#l1'),r.motivo==='empate'?'Nadie fue expulsado (empate).':'Nadie fue expulsado (se saltó la votación).',60,t))return;
+      const phrase=r.wasImpostor?` era ${art} impostor.`:` no era ${art} impostor.`;
+      const P=Math.max(250,W*0.12);                              // pausa entre el nombre y la frase
+      const u=clampMs((W-P)/(2*len(ej.name)+len(phrase)));       // ms por letra de la frase (el nombre va al doble, más lento)
+      if(!await type($('#l1'),ej.name,2*u,t))return;await sleep(P);if(t!==tok)return;
+      if(!await type($('#l1'),phrase,u,t))return;
+    }else{
+      const msg=r.motivo==='empate'?'Nadie fue expulsado (empate).':'Nadie fue expulsado (se saltó la votación).';
+      if(!await type($('#l1'),msg,clampMs(W/len(msg)),t))return;
+    }
     await sleep(1200);if(t!==tok)return;
     const left=r.impostorsLeft==null?1:r.impostorsLeft;
     $('#l2').textContent=left===0?'No quedan impostores.':left===1?'Queda 1 impostor.':`Quedan ${left} impostores.`;$('#l2').classList.add('show');
